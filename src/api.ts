@@ -153,6 +153,18 @@ export const api = {
   pickSavePath: (defaultName: string) => invoke<string | null>("pick_save_path", { defaultName }),
   exportCards: (request: ExportRequest) => invoke<number>("export_cards", { request }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+
+  authStatus: () => invoke<AuthStatus>("auth_status"),
+  unlock: (password: string) => invoke<boolean>("unlock", { password }),
+  setPassword: (current: string, next: string) => invoke<void>("set_password", { current, new: next }),
+  removePassword: (current: string) => invoke<void>("remove_password", { current }),
+  revealPasswordFile: () => invoke<void>("reveal_password_file"),
+
+  backupStatus: () => invoke<BackupStatus>("backup_status"),
+  setBackupSettings: (dir: string | null, intervalMinutes: number, keep: number) =>
+    invoke<void>("set_backup_settings", { dir, intervalMinutes, keep }),
+  backupNow: () => invoke<string | null>("backup_now"),
+  pickFolder: () => invoke<string | null>("pick_folder"),
 };
 
 export interface Sheet {
@@ -212,4 +224,16 @@ export interface ExportRequest {
   cardIds: number[];
   kindLabels: { company: string; person: string };
   output: string;
+}
+
+export interface AuthStatus {
+  passwordSet: boolean;
+  unlocked: boolean;
+}
+
+export interface BackupStatus {
+  settings: { dir: string | null; intervalMinutes: number; keep: number };
+  /** Время — Unix, секунды. */
+  state: { lastBackupAt: number | null; lastAttemptAt: number | null; lastError: string | null };
+  copies: { name: string; path: string; size: number }[];
 }

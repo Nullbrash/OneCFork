@@ -9,6 +9,8 @@ import { parseTheme, resolveTheme, type ThemeChoice } from "./lib/theme";
 import { CardScreen } from "./screens/CardScreen";
 import { ExportScreen } from "./screens/ExportScreen";
 import { ImportScreen } from "./screens/ImportScreen";
+import { LoginScreen } from "./screens/LoginScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 import { ListScreen, type Tab } from "./screens/ListScreen";
 import { ToastProvider, useToasts } from "./ui/toasts";
 
@@ -16,7 +18,8 @@ type Screen =
   | { name: "list" }
   | { name: "card"; id: number | null; newKind: CardKind }
   | { name: "import" }
-  | { name: "export"; cardIds: number[]; peopleOnly: boolean };
+  | { name: "export"; cardIds: number[]; peopleOnly: boolean }
+  | { name: "settings" };
 
 const COLUMNS_KEY = "listColumns";
 const THEME_KEY = "theme";
@@ -24,9 +27,39 @@ const THEME_KEY = "theme";
 export function App() {
   return (
     <ToastProvider>
-      <Shell />
+      <Gate />
     </ToastProvider>
   );
+}
+
+/** Пока пароль задан и не введён — только экран входа: остальное даже не
+ * запрашивает данные (Rust-часть их и не отдаст). */
+function Gate() {
+  const toasts = useToasts();
+  const [unlocked, setUnlocked] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    // До входа тема — как в Windows: сохранённый выбор лежит в базе.
+    document.documentElement.dataset.theme = resolveTheme(
+      "system",
+      window.matchMedia("(prefers-color-scheme: dark)").matches,
+    );
+    api
+      .authStatus()
+      .then((s) => setUnlocked(s.unlocked))
+      .catch(toasts.error);
+  }, [toasts.error]);
+
+  const onUnlocked = useCallback(
+    (wasReset: boolean) => {
+      if (wasReset) toasts.show(t.auth.wasReset);
+      setUnlocked(true);
+    },
+    [toasts],
+  );
+
+  if (unlocked === null) return null;
+  return unlocked ? <Shell /> : <LoginScreen onUnlocked={onUnlocked} />;
 }
 
 function Shell() {
@@ -142,6 +175,7 @@ function Shell() {
           onOpen={open}
           onCreate={(kind) => setScreen({ name: "card", id: null, newKind: kind })}
           onImport={() => setScreen({ name: "import" })}
+          onSettings={() => setScreen({ name: "settings" })}
           onExport={(cardIds, peopleOnly) => setScreen({ name: "export", cardIds, peopleOnly })}
           query={query}
           onQuery={setQuery}
@@ -152,6 +186,8 @@ function Shell() {
         />
       ) : screen.name === "import" ? (
         <ImportScreen onBack={back} onImported={changed} />
+      ) : screen.name === "settings" ? (
+        <SettingsScreen onBack={back} />
       ) : screen.name === "export" ? (
         <ExportScreen
           cardIds={screen.cardIds}

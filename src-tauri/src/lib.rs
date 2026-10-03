@@ -1,3 +1,5 @@
+pub mod auth;
+pub mod backup;
 mod commands;
 pub mod db_mode;
 pub mod export;
@@ -7,10 +9,14 @@ pub mod model;
 pub mod repo;
 pub mod spreadsheet;
 
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tauri::Manager;
 
+use crate::backup::Trigger;
 use crate::commands::AppInfo;
 use crate::db_mode::{DbMode, DB_MODE_ENV};
 use crate::repo::{Repository, SqliteRepository};
@@ -18,7 +24,20 @@ use crate::repo::{Repository, SqliteRepository};
 pub struct AppState {
     pub repo: Mutex<SqliteRepository>,
     pub info: AppInfo,
+    pub mode: DbMode,
+    pub data_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub auth_file: PathBuf,
+    /// Вход выполнен в этом запуске (если пароль задан).
+    pub unlocked: AtomicBool,
+    /// Копии делаются по одной: фоновая, при закрытии и по кнопке не должны
+    /// писать одновременно.
+    pub backup_lock: Mutex<()>,
 }
+
+/// Как часто фоновый поток проверяет, не пора ли сделать копию. Сам период
+/// копий — в настройках (по умолчанию час); минута — точность.
+const BACKUP_CHECK_EVERY: Duration = Duration::from_secs(60);
 
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
@@ -43,8 +62,35 @@ pub fn run() {
                 db_path: db_path.display().to_string(),
                 schema_version: repo.schema_version()?,
             };
-            app.manage(AppState { repo: Mutex::new(repo), info });
+            app.manage(AppState {
+                repo: Mutex::new(repo),
+                info,
+                mode,
+                auth_file: auth::auth_file(&dir, mode),
+                data_dir: dir,
+                db_path,
+                unlocked: AtomicBool::new(false),
+                backup_lock: Mutex::new(()),
+            });
+
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(BACKUP_CHECK_EVERY);
+                let state = handle.state::<AppState>();
+                if let Err(e) = commands::perform_backup(&state, Trigger::Scheduled) {
+                    // Причина уже записана в учёт копий — её покажет экран настроек.
+                    eprintln!("scheduled backup failed: {e}");
+                }
+            });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let state = window.state::<AppState>();
+                if let Err(e) = commands::perform_backup(&state, Trigger::Close) {
+                    eprintln!("backup on close failed: {e}");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -88,6 +134,15 @@ pub fn run() {
             commands::pick_save_path,
             commands::export_cards,
             commands::reveal_file,
+            commands::auth_status,
+            commands::unlock,
+            commands::set_password,
+            commands::remove_password,
+            commands::reveal_password_file,
+            commands::backup_status,
+            commands::set_backup_settings,
+            commands::backup_now,
+            commands::pick_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OneCFork");

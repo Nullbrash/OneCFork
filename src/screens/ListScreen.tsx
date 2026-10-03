@@ -33,6 +33,7 @@ interface Props {
   onOpen: (id: number) => void;
   onCreate: (kind: CardKind) => void;
   onImport: () => void;
+  onSettings: () => void;
   /** id карточек в порядке списка — для выгрузки «того, что сейчас в списке». */
   onExport: (cardIds: number[], peopleOnly: boolean) => void;
   query: string;
@@ -131,6 +132,9 @@ export function ListScreen(props: Props) {
             </button>
             {menu === "settings" && (
               <div className="menu">
+                <button type="button" onClick={props.onSettings}>
+                  {t.settings.open}
+                </button>
                 <div className="menu-title">{t.theme.label}</div>
                 {(["system", "light", "dark"] as const).map((choice) => (
                   <label key={choice} className="menu-option">

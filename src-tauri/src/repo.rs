@@ -17,6 +17,7 @@ pub enum RepoError {
     PresetTerm,
     Migration(MigrationError),
     Db(rusqlite::Error),
+    Io(String),
 }
 
 impl std::fmt::Display for RepoError {
@@ -28,6 +29,7 @@ impl std::fmt::Display for RepoError {
             RepoError::PresetTerm => write!(f, "preset terms cannot be deleted"),
             RepoError::Migration(e) => write!(f, "{e}"),
             RepoError::Db(e) => write!(f, "database error: {e}"),
+            RepoError::Io(e) => write!(f, "file error: {e}"),
         }
     }
 }
@@ -148,6 +150,24 @@ pub struct SqliteRepository {
 impl SqliteRepository {
     pub fn open(path: &Path) -> RepoResult<Self> {
         Self::init(Connection::open(path)?)
+    }
+
+    /// Целостная копия базы в файл `target` (средствами SQLite: копия
+    /// согласована, даже пока база открыта). Сначала пишется во временный
+    /// файл и только потом переименовывается — оборванная копия не выдаст
+    /// себя за готовую.
+    pub fn backup_to(&self, target: &Path) -> RepoResult<()> {
+        let partial = target.with_extension("partial");
+        let _ = std::fs::remove_file(&partial);
+        let result = self
+            .conn
+            .execute("VACUUM INTO ?1", [partial.display().to_string()])
+            .map_err(RepoError::from)
+            .and_then(|_| std::fs::rename(&partial, target).map_err(|e| RepoError::Io(e.to_string())));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        result
     }
 
     /// Только для тестов: база в памяти, рабочие файлы не затрагиваются.
@@ -1381,6 +1401,20 @@ mod tests {
         row.action = ImportAction::Merge;
         row.merge_into = Some(person);
         assert!(matches!(r.import_batch(&[row]), Err(RepoError::WrongKind(_))));
+    }
+
+    #[test]
+    fn backup_to_writes_a_complete_openable_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = SqliteRepository::open(&dir.path().join("live.db")).unwrap();
+        r.create_card(CardKind::Company, "В копии", "").unwrap();
+        let copy = dir.path().join("копия.db");
+        r.backup_to(&copy).unwrap();
+        assert!(!copy.with_extension("partial").exists());
+        let restored = SqliteRepository::open(&copy).unwrap();
+        assert_eq!(restored.list_cards(None).unwrap()[0].title, "В копии");
+        // В несуществующую папку (вынутая флешка) — ошибка, без мусора.
+        assert!(r.backup_to(&dir.path().join("нет/копия.db")).is_err());
     }
 
     #[test]
