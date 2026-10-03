@@ -1,0 +1,2 @@
+# bash спотыкается о  в CRLF — скрипты .sh всегда с LF
+*.sh text eol=lf

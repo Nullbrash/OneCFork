@@ -1,6 +1,6 @@
 [package]
 name = "onecfork"
-version = "0.1.0"
+version = "1.0.0"
 description = "OneCFork — personal phone book of suppliers, installers, couriers and customers"
 authors = ["Nullbrash"]
 edition = "2021"
@@ -27,6 +27,7 @@ tauri-plugin-clipboard-manager = "2.4.1"
 calamine = "0.36.1"
 umya-spreadsheet = "3.1.0"
 argon2 = "0.6.0"
+tauri-plugin-updater = "2.13.1"
 
 [profile.release]
 codegen-units = 1

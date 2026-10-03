@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OneCFork",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "dev.nullbrash.onecfork",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,10 +27,16 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "languages": [
+          "Russian"
+        ],
+        "displayLanguageSelector": false
       }
     },
     "icon": [
@@ -39,6 +45,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzNDAwRkU5Qjk1MjlEMjQKUldRa25WSzU2UTlBcytmOEpBdVI4ZmlkbmN1N2w4TWRJdHhTK3l4ZFdKWEZYd0JsT2h0SzlkV3AK",
+      "endpoints": [
+        "https://github.com/Nullbrash/OneCFork/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

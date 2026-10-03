@@ -496,6 +496,31 @@ table.rows tbody tr:hover {
   color: var(--muted);
   font-size: 12px;
   border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.update-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.progress {
+  display: inline-block;
+  width: 120px;
+  height: 6px;
+  background: var(--chip);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
 }
 
 .search-bar {

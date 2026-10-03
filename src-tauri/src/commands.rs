@@ -590,3 +590,16 @@ pub async fn pick_folder(app: AppHandle) -> Option<String> {
         .and_then(|p| p.into_path().ok())
         .map(|p| p.display().to_string())
 }
+
+// ---------- Обновления ----------
+
+#[tauri::command]
+pub fn start_update_check(app: AppHandle) {
+    crate::updates::start_once(&app);
+}
+
+/// «Перезапустить сейчас»: поставить скачанное обновление и открыть новую версию.
+#[tauri::command]
+pub fn install_update_now(state: State<'_, AppState>) -> CmdResult<bool> {
+    crate::updates::install_pending(&state, true).map_err(|e| fail("update_failed", e))
+}

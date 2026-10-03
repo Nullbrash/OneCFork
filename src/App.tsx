@@ -13,6 +13,7 @@ import { LoginScreen } from "./screens/LoginScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { ListScreen, type Tab } from "./screens/ListScreen";
 import { ToastProvider, useToasts } from "./ui/toasts";
+import { UpdateBar } from "./ui/UpdateBar";
 
 type Screen =
   | { name: "list" }
@@ -211,7 +212,10 @@ function Shell() {
       )}
       {info && (
         <footer className="status">
-          {t.info.version} {info.version}
+          <span>
+            {t.info.version} {info.version}
+          </span>
+          <UpdateBar />
         </footer>
       )}
     </div>

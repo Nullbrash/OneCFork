@@ -8,6 +8,7 @@ pub mod migrations;
 pub mod model;
 pub mod repo;
 pub mod spreadsheet;
+pub mod updates;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -33,6 +34,8 @@ pub struct AppState {
     /// Копии делаются по одной: фоновая, при закрытии и по кнопке не должны
     /// писать одновременно.
     pub backup_lock: Mutex<()>,
+    pub pending_update: Mutex<Option<updates::PendingUpdate>>,
+    pub update_started: AtomicBool,
 }
 
 /// Как часто фоновый поток проверяет, не пора ли сделать копию. Сам период
@@ -48,6 +51,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -71,6 +75,8 @@ pub fn run() {
                 db_path,
                 unlocked: AtomicBool::new(false),
                 backup_lock: Mutex::new(()),
+                pending_update: Mutex::new(None),
+                update_started: AtomicBool::new(false),
             });
 
             let handle = app.handle().clone();
@@ -89,6 +95,11 @@ pub fn run() {
                 let state = window.state::<AppState>();
                 if let Err(e) = commands::perform_backup(&state, Trigger::Close) {
                     eprintln!("backup on close failed: {e}");
+                }
+                // Скачанное обновление ставится при закрытии, без перезапуска:
+                // человек закрыл программу — она не должна открыться сама.
+                if let Err(e) = updates::install_pending(&state, false) {
+                    eprintln!("update on close failed: {e}");
                 }
             }
         })
@@ -143,6 +154,8 @@ pub fn run() {
             commands::set_backup_settings,
             commands::backup_now,
             commands::pick_folder,
+            commands::start_update_check,
+            commands::install_update_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OneCFork");

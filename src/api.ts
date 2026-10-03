@@ -165,6 +165,9 @@ export const api = {
     invoke<void>("set_backup_settings", { dir, intervalMinutes, keep }),
   backupNow: () => invoke<string | null>("backup_now"),
   pickFolder: () => invoke<string | null>("pick_folder"),
+
+  startUpdateCheck: () => invoke<void>("start_update_check"),
+  installUpdateNow: () => invoke<boolean>("install_update_now"),
 };
 
 export interface Sheet {
