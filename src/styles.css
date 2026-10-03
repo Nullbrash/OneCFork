@@ -1,0 +1,48 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #1b1f24;
+  background: #f5f6f8;
+}
+
+body {
+  margin: 0;
+}
+
+.test-plaque {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 24px;
+  background: #c62828;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  border-radius: 0 0 8px 8px;
+  z-index: 1000;
+}
+
+.stub {
+  max-width: 720px;
+  margin: 64px auto;
+  padding: 0 16px;
+}
+
+.stub dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+}
+
+.stub dt {
+  color: #5a6270;
+}
+
+.stub dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.error {
+  color: #c62828;
+}

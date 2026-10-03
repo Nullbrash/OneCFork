@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Минимальные права интерфейса. Данные, файлы и сеть — только через команды Rust-части.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

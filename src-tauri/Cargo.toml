@@ -1,0 +1,33 @@
+[package]
+name = "onecfork"
+version = "0.1.0"
+description = "OneCFork — personal phone book of suppliers, installers, couriers and customers"
+authors = ["Nullbrash"]
+edition = "2021"
+
+[lib]
+# Отдельное имя библиотеки: на Windows одинаковые имена lib и bin конфликтуют
+# (https://github.com/rust-lang/cargo/issues/8519).
+name = "onecfork_lib"
+# Только rlib: staticlib/cdylib из шаблона нужны лишь для мобильных платформ,
+# а проект — только Windows.
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
