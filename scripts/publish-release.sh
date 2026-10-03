@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Публикация собранного релиза на GitHub (метод — глобальное правило
 # «Публикация релизов на GitHub»). Только по явной команде пользователя.
+#   bash scripts/publish-release.sh notes.txt     (описание — файлом, UTF-8)
 #   bash scripts/publish-release.sh "что нового"
 # Ключ доступа берётся из Git Credential Manager и живёт только в переменной
 # этого процесса — не выводится и никуда не пишется.
@@ -20,7 +21,14 @@ for f in "$EXE" "$EXE.sig" "latest.json"; do
 done
 PRERELEASE=false
 case "$VERSION" in *-*) PRERELEASE=true ;; esac
-NOTES="${1:-}"
+# Описание — из файла, если передан путь: кириллица в аргументах программ
+# Windows из Git Bash искажается системной кодовой страницей.
+# Временные файлы — по относительному пути: «@/tmp/…» в аргументе curl
+# Git Bash не переводит в путь Windows.
+NOTES_FILE="$DIR/.release-notes.txt"
+BODY_FILE="$DIR/.release-body.json"
+trap 'rm -f "$NOTES_FILE" "$BODY_FILE"' EXIT
+if [ -n "${1:-}" ] && [ -f "$1" ]; then cp "$1" "$NOTES_FILE"; else printf '%s' "${1:-}" > "$NOTES_FILE"; fi
 
 export GCM_INTERACTIVE=never
 TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | sed -n 's/^password=//p')
@@ -33,8 +41,13 @@ LOGIN=$(api https://api.github.com/user | node -e "let s='';process.stdin.on('da
 CAN_PUSH=$(api "https://api.github.com/repos/$OWNER/$REPO" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(!!(JSON.parse(s).permissions||{}).push))")
 [ "$CAN_PUSH" = "true" ] || { echo "у $LOGIN нет прав на запись в $OWNER/$REPO — стоп" >&2; exit 1; }
 
-BODY=$(node -e "console.log(JSON.stringify({tag_name:process.argv[1],target_commitish:'main',name:'OneCFork '+process.argv[2],body:process.argv[3],draft:false,prerelease:process.argv[4]==='true'}))" "$TAG" "$VERSION" "$NOTES" "$PRERELEASE")
-RELEASE=$(api -X POST "https://api.github.com/repos/$OWNER/$REPO/releases" -d "$BODY")
+# Повторный запуск не должен создать второй релиз с тем же тегом.
+EXISTS=$(api -o /dev/null -w "%{http_code}" "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG")
+[ "$EXISTS" = "404" ] || { echo "релиз $TAG уже есть (HTTP $EXISTS) — стоп" >&2; exit 1; }
+
+# Тело запроса — файлом в UTF-8 (через аргумент curl кириллица ломается).
+node -e "const fs=require('fs');fs.writeFileSync(process.argv[1],JSON.stringify({tag_name:process.argv[2],target_commitish:'main',name:'OneCFork '+process.argv[3],body:fs.readFileSync(process.argv[4],'utf8').trim(),draft:false,prerelease:process.argv[5]==='true'}),'utf8')" "$BODY_FILE" "$TAG" "$VERSION" "$NOTES_FILE" "$PRERELEASE"
+RELEASE=$(api -X POST -H "Content-Type: application/json; charset=utf-8" "https://api.github.com/repos/$OWNER/$REPO/releases" --data-binary "@$BODY_FILE")
 ID=$(echo "$RELEASE" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(!r.id){console.error(r.message||s);process.exit(1)}console.log(r.id)})")
 UPLOAD="https://uploads.github.com/repos/$OWNER/$REPO/releases/$ID/assets"
 for f in "$EXE" "$EXE.sig" "latest.json"; do
