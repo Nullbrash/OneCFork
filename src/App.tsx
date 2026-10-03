@@ -3,6 +3,7 @@ import { api, type CardKind } from "./api";
 import { t } from "./i18n";
 import { fetchAppInfo, showTestPlaque, type AppInfo } from "./lib/appInfo";
 import { DEFAULT_COLUMNS, parseColumns, type ColumnSettings } from "./lib/columns";
+import { NO_FILTERS, type SearchFilters } from "./lib/search";
 import { DEFAULT_SORT, type SortState } from "./lib/sort";
 import { parseTheme, resolveTheme, type ThemeChoice } from "./lib/theme";
 import { CardScreen } from "./screens/CardScreen";
@@ -31,8 +32,13 @@ function Shell() {
   const [columns, setColumns] = useState<ColumnSettings>(DEFAULT_COLUMNS);
   const [theme, setTheme] = useState<ThemeChoice>("system");
   const [revision, setRevision] = useState(0);
+  // Поиск живёт здесь, а не в списке: вернулся из карточки — запрос и фильтры на месте.
+  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState<SearchFilters>(NO_FILTERS);
+  const [focusSearch, setFocusSearch] = useState(0);
 
   const changed = useCallback(() => setRevision((r) => r + 1), []);
+  const searchFocused = useCallback(() => setFocusSearch(0), []);
   const back = useCallback(() => setScreen({ name: "list" }), []);
   const open = useCallback((id: number) => setScreen({ name: "card", id, newKind: "company" }), []);
 
@@ -77,6 +83,19 @@ function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [screen.name, back]);
 
+  // Ctrl + F — наш поиск вместо встроенного поиска по странице. По коду
+  // клавиши, а не по букве: в русской раскладке та же клавиша — «а».
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey && e.code === "KeyF")) return;
+      e.preventDefault();
+      back();
+      setFocusSearch((n) => n + 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [back]);
+
   const saveColumns = (next: ColumnSettings) => {
     setColumns(next);
     api.setSetting(COLUMNS_KEY, JSON.stringify(next)).catch(toasts.error);
@@ -116,6 +135,12 @@ function Shell() {
           revision={revision}
           onOpen={open}
           onCreate={(kind) => setScreen({ name: "card", id: null, newKind: kind })}
+          query={query}
+          onQuery={setQuery}
+          filters={filters}
+          onFilters={setFilters}
+          focusSearch={focusSearch}
+          onSearchFocused={searchFocused}
         />
       ) : (
         <CardScreen

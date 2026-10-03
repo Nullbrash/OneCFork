@@ -497,3 +497,62 @@ table.rows tbody tr:hover {
   font-size: 12px;
   border-top: 1px solid var(--border);
 }
+
+.search-bar {
+  margin: 4px 0 8px;
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.search-input {
+  position: relative;
+  flex: 1;
+  min-width: 260px;
+  max-width: 560px;
+}
+
+.search-input input {
+  width: 100%;
+  padding-right: 28px;
+}
+
+.search-input .clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  padding: 0 6px;
+}
+
+.filters {
+  display: flex;
+  gap: 6px;
+}
+
+.filter-menu {
+  left: 0;
+  right: auto;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+button.active-filter {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.filter-chips {
+  margin-top: 8px;
+}
+
+.found {
+  margin: 0 0 6px;
+}

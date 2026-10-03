@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type CardKind, type ListRow } from "../api";
 import { t } from "../i18n";
 import {
@@ -11,9 +11,11 @@ import {
   type ColumnId,
   type ColumnSettings,
 } from "../lib/columns";
+import { buildIndex, isActive, searchRows, type SearchFilters } from "../lib/search";
 import { nextSort, sortRows, type SortState } from "../lib/sort";
 import type { ThemeChoice } from "../lib/theme";
 import { useToasts } from "../ui/toasts";
+import { SearchBar } from "./SearchBar";
 
 export type Tab = "all" | "companies" | "people";
 
@@ -30,6 +32,12 @@ interface Props {
   revision: number;
   onOpen: (id: number) => void;
   onCreate: (kind: CardKind) => void;
+  query: string;
+  onQuery: (q: string) => void;
+  filters: SearchFilters;
+  onFilters: (f: SearchFilters) => void;
+  focusSearch: number;
+  onSearchFocused: () => void;
 }
 
 export function ListScreen(props: Props) {
@@ -49,8 +57,12 @@ export function ListScreen(props: Props) {
     return () => window.removeEventListener("click", close);
   }, [menu]);
 
-  const companies = rows?.filter((r) => r.kind === "company") ?? [];
-  const people = rows?.filter((r) => r.kind === "person") ?? [];
+  const index = useMemo(() => buildIndex(rows ?? []), [rows]);
+  const searching = isActive(props.query, props.filters);
+  const shown = searching ? searchRows(index, props.query, props.filters) : (rows ?? []);
+  const companies = shown.filter((r) => r.kind === "company");
+  const people = shown.filter((r) => r.kind === "person");
+  const shownInTab = tab === "companies" ? companies.length : tab === "people" ? people.length : shown.length;
 
   return (
     <div className="screen">
@@ -120,9 +132,23 @@ export function ListScreen(props: Props) {
       </header>
 
       <main className="list-body">
+        {rows !== null && rows.length > 0 && (
+          <SearchBar
+            query={props.query}
+            onQuery={props.onQuery}
+            filters={props.filters}
+            onFilters={props.onFilters}
+            focusToken={props.focusSearch}
+            onFocused={props.onSearchFocused}
+            revision={revision}
+          />
+        )}
+        {searching && rows !== null && rows.length > 0 && (
+          <p className="muted found">{shownInTab ? t.search.found(shownInTab) : t.search.nothing}</p>
+        )}
         {rows === null && <p className="muted">{t.loading}</p>}
         {rows !== null && rows.length === 0 && <p className="empty">{t.list.empty}</p>}
-        {rows !== null && rows.length > 0 && (
+        {rows !== null && rows.length > 0 && !(searching && shownInTab === 0) && (
           <>
             {tab !== "people" && (
               <RowsSection
@@ -155,9 +181,12 @@ function RowsSection({
   sort,
   onSort,
   onOpen,
+  query,
+  filters,
 }: Props & { title: string | null; rows: ListRow[]; forCompanies: boolean }) {
   const toasts = useToasts();
   const visible = visibleColumns(columns, forCompanies);
+  if (rows.length === 0 && isActive(query, filters)) return null;
   const sorted = sortRows(rows, visible.includes(sort.column) ? sort : { column: "title", dir: sort.dir });
 
   const copy = (text: string) =>

@@ -68,6 +68,13 @@ export interface ListRow {
   specializations: string[];
   companies: string[];
   mainPhone: string | null;
+  roleIds: number[];
+  specializationIds: number[];
+  addressLabelIds: number[];
+  /** Скрытый текст карточки для поиска (контакты, адреса, заметка…). */
+  searchText: string;
+  /** Ключи телефонов — цифры без кода страны. */
+  phoneKeys: string[];
 }
 
 export interface Duplicate {

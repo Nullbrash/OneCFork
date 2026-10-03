@@ -214,6 +214,14 @@ pub struct ListRow {
     /// Для человека — компании, где он работает; для компании — пусто.
     pub companies: Vec<String>,
     pub main_phone: Option<String>,
+    pub role_ids: Vec<i64>,
+    pub specialization_ids: Vec<i64>,
+    pub address_label_ids: Vec<i64>,
+    /// Всё, по чему карточку можно найти, кроме видимых столбцов: контакты,
+    /// адреса, заметка, названия файлов, должности. Нормализует интерфейс.
+    pub search_text: String,
+    /// Ключи телефонных номеров (`phone_key`) — поиск номера в любом формате.
+    pub phone_keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

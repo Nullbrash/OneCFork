@@ -206,19 +206,21 @@ impl SqliteRepository {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// card_id → имена значений словаря, для всех живых карточек разом.
-    fn names_by_card(&self, which: CardVocabulary) -> RepoResult<HashMap<i64, Vec<String>>> {
+    /// card_id → (id, имя) значений словаря, для всех карточек разом.
+    fn terms_by_card(&self, which: CardVocabulary) -> RepoResult<HashMap<i64, Vec<(i64, String)>>> {
         let (link, column) = which.link();
         let table = which.vocabulary().table();
         let sql = format!(
-            "SELECT l.card_id, t.name FROM {link} l JOIN {table} t ON t.id = l.{column}
+            "SELECT l.card_id, t.id, t.name FROM {link} l JOIN {table} t ON t.id = l.{column}
              ORDER BY l.card_id, t.is_preset DESC, t.name_key"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut map: HashMap<i64, Vec<String>> = HashMap::new();
-        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (id, name) = row?;
-            map.entry(id).or_default().push(name);
+        let mut map: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+        for row in stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+        })? {
+            let (card, id, name) = row?;
+            map.entry(card).or_default().push((id, name));
         }
         Ok(map)
     }
@@ -307,39 +309,96 @@ impl Repository for SqliteRepository {
 
     fn list_rows(&self, kind: Option<CardKind>) -> RepoResult<Vec<ListRow>> {
         let cards = self.list_cards(kind)?;
-        let mut roles = self.names_by_card(CardVocabulary::Roles)?;
-        let mut specs = self.names_by_card(CardVocabulary::Specializations)?;
+        let mut roles = self.terms_by_card(CardVocabulary::Roles)?;
+        let mut specs = self.terms_by_card(CardVocabulary::Specializations)?;
+        // Скрытый текст для поиска: собирается по карточкам из всех таблиц.
+        let mut extra: HashMap<i64, Vec<String>> = HashMap::new();
 
         let mut companies: HashMap<i64, Vec<String>> = HashMap::new();
         let mut stmt = self.conn.prepare(
-            "SELECT m.person_id, c.title FROM company_people m
+            "SELECT m.person_id, c.title, m.position FROM company_people m
              JOIN cards c ON c.id = m.company_id WHERE c.deleted_at IS NULL
              ORDER BY m.person_id, c.title_key",
         )?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (person, title) = row?;
+        for row in stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })? {
+            let (person, title, position) = row?;
             companies.entry(person).or_default().push(title);
+            extra.entry(person).or_default().push(position);
         }
 
         let mut phones: HashMap<i64, String> = HashMap::new();
+        let mut phone_keys: HashMap<i64, Vec<String>> = HashMap::new();
         let mut stmt = self
             .conn
-            .prepare("SELECT card_id, value FROM contacts WHERE channel = 'phone' ORDER BY card_id, position")?;
+            .prepare("SELECT card_id, channel, value, value_key, label FROM contacts ORDER BY card_id, position")?;
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })? {
+            let (card, channel, value, key, label) = row?;
+            if channel == "phone" {
+                phones.entry(card).or_insert_with(|| value.clone());
+            }
+            if matches!(channel.as_str(), "phone" | "whatsapp" | "viber") && !key.is_empty() {
+                phone_keys.entry(card).or_default().push(key);
+            }
+            let e = extra.entry(card).or_default();
+            e.push(value);
+            e.push(label);
+        }
+
+        let mut labels: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut stmt = self.conn.prepare("SELECT card_id, text, label_id FROM addresses ORDER BY card_id, position")?;
+        for row in stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?))
+        })? {
+            let (card, text, label) = row?;
+            extra.entry(card).or_default().push(text);
+            if let Some(label) = label {
+                let l = labels.entry(card).or_default();
+                if !l.contains(&label) {
+                    l.push(label);
+                }
+            }
+        }
+
+        let mut stmt = self.conn.prepare("SELECT card_id, title FROM file_links")?;
         for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (card, value) = row?;
-            phones.entry(card).or_insert(value);
+            let (card, title) = row?;
+            extra.entry(card).or_default().push(title);
         }
 
         Ok(cards
             .into_iter()
-            .map(|c| ListRow {
-                roles: roles.remove(&c.id).unwrap_or_default(),
-                specializations: specs.remove(&c.id).unwrap_or_default(),
-                companies: companies.remove(&c.id).unwrap_or_default(),
-                main_phone: phones.remove(&c.id),
-                id: c.id,
-                kind: c.kind,
-                title: c.title,
+            .map(|c| {
+                let (role_ids, role_names): (Vec<i64>, Vec<String>) =
+                    roles.remove(&c.id).unwrap_or_default().into_iter().unzip();
+                let (spec_ids, spec_names): (Vec<i64>, Vec<String>) =
+                    specs.remove(&c.id).unwrap_or_default().into_iter().unzip();
+                let mut text = extra.remove(&c.id).unwrap_or_default();
+                text.push(c.note);
+                text.retain(|t| !t.trim().is_empty());
+                ListRow {
+                    roles: role_names,
+                    specializations: spec_names,
+                    companies: companies.remove(&c.id).unwrap_or_default(),
+                    main_phone: phones.remove(&c.id),
+                    role_ids,
+                    specialization_ids: spec_ids,
+                    address_label_ids: labels.remove(&c.id).unwrap_or_default(),
+                    search_text: text.join("\n"),
+                    phone_keys: phone_keys.remove(&c.id).unwrap_or_default(),
+                    id: c.id,
+                    kind: c.kind,
+                    title: c.title,
+                }
             })
             .collect())
     }
@@ -934,9 +993,37 @@ mod tests {
         let rows = r.list_rows(Some(CardKind::Person)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].roles, ["Монтажник"]);
+        assert_eq!(rows[0].role_ids, [role]);
         assert_eq!(rows[0].specializations, ["Шторы"]);
+        assert_eq!(rows[0].specialization_ids, [spec]);
         assert_eq!(rows[0].companies, ["Ателье"]);
         assert_eq!(rows[0].main_phone.as_deref(), Some("+7 000 1"));
+    }
+
+    #[test]
+    fn list_rows_carries_hidden_search_text_phone_keys_and_label_ids() {
+        let mut r = repo();
+        let c = r.create_card(CardKind::Company, "Ателье", "звонить после 10").unwrap();
+        let p = r.create_card(CardKind::Person, "Мастер", "").unwrap();
+        r.link_person(c, p, "Бригадир").unwrap();
+        r.add_contact(c, Channel::Telegram, "@atelier_test", "основной").unwrap();
+        r.add_contact(c, Channel::Phone, "8 (900) 000-11-22", "").unwrap();
+        let store = r.find_or_add_term(Vocabulary::AddressLabels, "Склад").unwrap();
+        r.add_address(c, "ул. Складская, 5", Some(store)).unwrap();
+        r.add_address(c, "ул. Вторая, 6", Some(store)).unwrap();
+        r.add_file_link(c, FileLinkKind::Local, r"C:\x.xlsx", "Каталог тканей").unwrap();
+
+        let rows = r.list_rows(None).unwrap();
+        let company = rows.iter().find(|x| x.id == c).unwrap();
+        for part in ["звонить после 10", "@atelier_test", "основной", "Складская", "Каталог тканей"] {
+            assert!(company.search_text.contains(part), "missing {part}");
+        }
+        assert_eq!(company.phone_keys, ["9000001122"]);
+        assert_eq!(company.address_label_ids, [store]);
+        // Компания не ищется по своим людям — их имён в её тексте нет.
+        assert!(!company.search_text.contains("Мастер"));
+        let person = rows.iter().find(|x| x.id == p).unwrap();
+        assert!(person.search_text.contains("Бригадир"));
     }
 
     #[test]

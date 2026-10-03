@@ -20,6 +20,11 @@ const row = (id: number, title: string, extra: Partial<ListRow> = {}): ListRow =
   specializations: [],
   companies: [],
   mainPhone: null,
+  roleIds: [],
+  specializationIds: [],
+  addressLabelIds: [],
+  searchText: "",
+  phoneKeys: [],
   ...extra,
 });
 

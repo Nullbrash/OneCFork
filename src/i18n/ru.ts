@@ -28,6 +28,17 @@ export const ru = {
     moveDown: "Ниже",
     copyPhone: "Скопировать телефон",
   },
+  search: {
+    placeholder: "Поиск: название, имя, телефон, адрес, заметка… (Ctrl + F)",
+    clear: "Очистить",
+    roles: "Роли",
+    specializations: "Специализации",
+    addressLabels: "Адреса",
+    resetAll: "Сбросить всё",
+    found: (n: number) => `Найдено: ${n}`,
+    nothing: "Ничего не найдено. Попробуйте изменить запрос или убрать фильтры.",
+    noTerms: "Значений пока нет",
+  },
   columns: {
     title: "Название",
     roles: "Роли",
