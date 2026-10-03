@@ -1,6 +1,7 @@
 //! Слой доступа к данным. Экраны и команды работают только через `Repository`,
 //! чтобы SQLite можно было заменить серверной базой, не трогая их.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -52,10 +53,22 @@ pub trait Repository {
 
     fn create_card(&mut self, kind: CardKind, title: &str, note: &str) -> RepoResult<i64>;
     fn update_card(&mut self, id: i64, title: &str, note: &str) -> RepoResult<()>;
+    /// Окончательное удаление (каскадом). Из интерфейса — только через
+    /// `soft_delete_card` + окно отмены.
     fn delete_card(&mut self, id: i64) -> RepoResult<()>;
+    fn soft_delete_card(&mut self, id: i64) -> RepoResult<()>;
+    fn restore_card(&mut self, id: i64) -> RepoResult<()>;
+    /// Стирает все помеченные удалёнными карточки; возвращает их число.
+    fn purge_deleted(&mut self) -> RepoResult<usize>;
+    /// Стирает одну помеченную удалённой карточку — по истечении её окна
+    /// «Отменить»; окна других удалённых карточек не затрагиваются.
+    fn purge_card(&mut self, id: i64) -> RepoResult<()>;
     fn get_card(&self, id: i64) -> RepoResult<Card>;
     fn list_cards(&self, kind: Option<CardKind>) -> RepoResult<Vec<Card>>;
+    fn list_rows(&self, kind: Option<CardKind>) -> RepoResult<Vec<ListRow>>;
     fn card_details(&self, id: i64) -> RepoResult<CardDetails>;
+    fn find_duplicates(&self, title: &str, phone: Option<&str>, exclude: Option<i64>)
+        -> RepoResult<Vec<Duplicate>>;
 
     fn list_terms(&self, vocabulary: Vocabulary) -> RepoResult<Vec<Term>>;
     /// Найти значение по имени (без учёта регистра) или добавить новое.
@@ -64,21 +77,46 @@ pub trait Repository {
     fn set_card_terms(&mut self, card_id: i64, which: CardVocabulary, term_ids: &[i64]) -> RepoResult<()>;
 
     fn add_contact(&mut self, card_id: i64, channel: Channel, value: &str, label: &str) -> RepoResult<i64>;
+    fn update_contact(&mut self, id: i64, channel: Channel, value: &str, label: &str) -> RepoResult<()>;
     fn remove_contact(&mut self, id: i64) -> RepoResult<()>;
     fn add_address(&mut self, card_id: i64, text: &str, label_id: Option<i64>) -> RepoResult<i64>;
+    fn update_address(&mut self, id: i64, text: &str, label_id: Option<i64>) -> RepoResult<()>;
     fn remove_address(&mut self, id: i64) -> RepoResult<()>;
     fn add_file_link(&mut self, card_id: i64, kind: FileLinkKind, target: &str, title: &str)
         -> RepoResult<i64>;
+    fn update_file_link(&mut self, id: i64, kind: FileLinkKind, target: &str, title: &str) -> RepoResult<()>;
     fn remove_file_link(&mut self, id: i64) -> RepoResult<()>;
 
+    /// Связать человека с компанией; повторный вызов меняет должность.
     fn link_person(&mut self, company_id: i64, person_id: i64, position: &str) -> RepoResult<()>;
     fn unlink_person(&mut self, company_id: i64, person_id: i64) -> RepoResult<()>;
+
+    fn get_setting(&self, key: &str) -> RepoResult<Option<String>>;
+    fn set_setting(&mut self, key: &str, value: &str) -> RepoResult<()>;
 }
 
 /// Ключ сравнения: строчные буквы (включая кириллицу) и одиночные пробелы —
 /// «Шторы», «шторы» и « шторы  » должны считаться одним значением.
 pub fn text_key(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Ключ телефона: только цифры; российские 11-значные номера с 7 или 8 в
+/// начале сводятся к 10 последним цифрам — «8 900 …» и «+7 900 …» совпадают.
+pub fn phone_key(s: &str) -> String {
+    let digits: String = s.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() == 11 && (digits.starts_with('7') || digits.starts_with('8')) {
+        digits[1..].to_string()
+    } else {
+        digits
+    }
+}
+
+fn contact_key(channel: Channel, value: &str) -> String {
+    match channel {
+        Channel::Phone | Channel::Whatsapp | Channel::Viber => phone_key(value),
+        _ => text_key(value),
+    }
 }
 
 fn required(value: &str, what: &'static str) -> RepoResult<String> {
@@ -96,6 +134,8 @@ fn check_changed(rows: usize) -> RepoResult<()> {
         Ok(())
     }
 }
+
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 pub struct SqliteRepository {
     conn: Connection,
@@ -119,10 +159,11 @@ impl SqliteRepository {
         Ok(Self { conn })
     }
 
+    /// Вид живой (не удалённой) карточки.
     fn card_kind(&self, id: i64) -> RepoResult<CardKind> {
         let kind: Option<String> = self
             .conn
-            .query_row("SELECT kind FROM cards WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT kind FROM cards WHERE id = ?1 AND deleted_at IS NULL", [id], |r| r.get(0))
             .optional()?;
         let kind = kind.ok_or(RepoError::NotFound)?;
         Ok(CardKind::from_db(&kind).expect("cards.kind is constrained by CHECK"))
@@ -134,11 +175,20 @@ impl SqliteRepository {
     }
 
     fn touch(&self, card_id: i64) -> RepoResult<()> {
-        self.conn.execute(
-            "UPDATE cards SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            [card_id],
-        )?;
+        self.conn.execute(&format!("UPDATE cards SET updated_at = {NOW} WHERE id = ?1"), [card_id])?;
         Ok(())
+    }
+
+    /// Обновляет `updated_at` карточки, которой принадлежит строка дочерней таблицы.
+    fn touch_owner(&self, table: &'static str, row_id: i64) -> RepoResult<()> {
+        let owner: Option<i64> = self
+            .conn
+            .query_row(&format!("SELECT card_id FROM {table} WHERE id = ?1"), [row_id], |r| r.get(0))
+            .optional()?;
+        match owner {
+            Some(card_id) => self.touch(card_id),
+            None => Err(RepoError::NotFound),
+        }
     }
 
     fn card_terms(&self, card_id: i64, which: CardVocabulary) -> RepoResult<Vec<Term>> {
@@ -147,13 +197,30 @@ impl SqliteRepository {
         let sql = format!(
             "SELECT t.id, t.name, t.is_preset FROM {table} t
              JOIN {link} l ON l.{column} = t.id
-             WHERE l.card_id = ?1 ORDER BY t.name_key"
+             WHERE l.card_id = ?1 ORDER BY t.is_preset DESC, t.name_key"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([card_id], |r| {
             Ok(Term { id: r.get(0)?, name: r.get(1)?, is_preset: r.get(2)? })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// card_id → имена значений словаря, для всех живых карточек разом.
+    fn names_by_card(&self, which: CardVocabulary) -> RepoResult<HashMap<i64, Vec<String>>> {
+        let (link, column) = which.link();
+        let table = which.vocabulary().table();
+        let sql = format!(
+            "SELECT l.card_id, t.name FROM {link} l JOIN {table} t ON t.id = l.{column}
+             ORDER BY l.card_id, t.is_preset DESC, t.name_key"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut map: HashMap<i64, Vec<String>> = HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, name) = row?;
+            map.entry(id).or_default().push(name);
+        }
+        Ok(map)
     }
 }
 
@@ -188,9 +255,10 @@ impl Repository for SqliteRepository {
     fn update_card(&mut self, id: i64, title: &str, note: &str) -> RepoResult<()> {
         let title = required(title, "title")?;
         let rows = self.conn.execute(
-            "UPDATE cards SET title = ?2, title_key = ?3, note = ?4,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            &format!(
+                "UPDATE cards SET title = ?2, title_key = ?3, note = ?4, updated_at = {NOW}
+                 WHERE id = ?1 AND deleted_at IS NULL"
+            ),
             params![id, title, text_key(&title), note.trim()],
         )?;
         check_changed(rows)
@@ -200,18 +268,80 @@ impl Repository for SqliteRepository {
         check_changed(self.conn.execute("DELETE FROM cards WHERE id = ?1", [id])?)
     }
 
+    fn soft_delete_card(&mut self, id: i64) -> RepoResult<()> {
+        check_changed(self.conn.execute(
+            &format!("UPDATE cards SET deleted_at = {NOW} WHERE id = ?1 AND deleted_at IS NULL"),
+            [id],
+        )?)
+    }
+
+    fn restore_card(&mut self, id: i64) -> RepoResult<()> {
+        check_changed(self.conn.execute(
+            "UPDATE cards SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+        )?)
+    }
+
+    fn purge_deleted(&mut self) -> RepoResult<usize> {
+        Ok(self.conn.execute("DELETE FROM cards WHERE deleted_at IS NOT NULL", [])?)
+    }
+
+    fn purge_card(&mut self, id: i64) -> RepoResult<()> {
+        check_changed(self.conn.execute("DELETE FROM cards WHERE id = ?1 AND deleted_at IS NOT NULL", [id])?)
+    }
+
     fn get_card(&self, id: i64) -> RepoResult<Card> {
-        let sql = format!("SELECT {CARD_COLUMNS} FROM cards WHERE id = ?1");
+        let sql = format!("SELECT {CARD_COLUMNS} FROM cards WHERE id = ?1 AND deleted_at IS NULL");
         self.conn.query_row(&sql, [id], card_from_row).optional()?.ok_or(RepoError::NotFound)
     }
 
     fn list_cards(&self, kind: Option<CardKind>) -> RepoResult<Vec<Card>> {
         let sql = format!(
-            "SELECT {CARD_COLUMNS} FROM cards WHERE ?1 IS NULL OR kind = ?1 ORDER BY title_key, id"
+            "SELECT {CARD_COLUMNS} FROM cards
+             WHERE deleted_at IS NULL AND (?1 IS NULL OR kind = ?1) ORDER BY title_key, id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([kind.map(CardKind::as_db)], card_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn list_rows(&self, kind: Option<CardKind>) -> RepoResult<Vec<ListRow>> {
+        let cards = self.list_cards(kind)?;
+        let mut roles = self.names_by_card(CardVocabulary::Roles)?;
+        let mut specs = self.names_by_card(CardVocabulary::Specializations)?;
+
+        let mut companies: HashMap<i64, Vec<String>> = HashMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT m.person_id, c.title FROM company_people m
+             JOIN cards c ON c.id = m.company_id WHERE c.deleted_at IS NULL
+             ORDER BY m.person_id, c.title_key",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (person, title) = row?;
+            companies.entry(person).or_default().push(title);
+        }
+
+        let mut phones: HashMap<i64, String> = HashMap::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT card_id, value FROM contacts WHERE channel = 'phone' ORDER BY card_id, position")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (card, value) = row?;
+            phones.entry(card).or_insert(value);
+        }
+
+        Ok(cards
+            .into_iter()
+            .map(|c| ListRow {
+                roles: roles.remove(&c.id).unwrap_or_default(),
+                specializations: specs.remove(&c.id).unwrap_or_default(),
+                companies: companies.remove(&c.id).unwrap_or_default(),
+                main_phone: phones.remove(&c.id),
+                id: c.id,
+                kind: c.kind,
+                title: c.title,
+            })
+            .collect())
     }
 
     fn card_details(&self, id: i64) -> RepoResult<CardDetails> {
@@ -266,11 +396,13 @@ impl Repository for SqliteRepository {
         let sql = match card.kind {
             CardKind::Company => {
                 "SELECT c.id, c.title, m.position FROM company_people m
-                 JOIN cards c ON c.id = m.person_id WHERE m.company_id = ?1 ORDER BY c.title_key"
+                 JOIN cards c ON c.id = m.person_id
+                 WHERE m.company_id = ?1 AND c.deleted_at IS NULL ORDER BY c.title_key"
             }
             CardKind::Person => {
                 "SELECT c.id, c.title, m.position FROM company_people m
-                 JOIN cards c ON c.id = m.company_id WHERE m.person_id = ?1 ORDER BY c.title_key"
+                 JOIN cards c ON c.id = m.company_id
+                 WHERE m.person_id = ?1 AND c.deleted_at IS NULL ORDER BY c.title_key"
             }
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -287,6 +419,57 @@ impl Repository for SqliteRepository {
             file_links,
             memberships,
         })
+    }
+
+    fn find_duplicates(
+        &self,
+        title: &str,
+        phone: Option<&str>,
+        exclude: Option<i64>,
+    ) -> RepoResult<Vec<Duplicate>> {
+        let mut found: Vec<Duplicate> = Vec::new();
+        let key = text_key(title);
+        if !key.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, kind, title FROM cards
+                 WHERE deleted_at IS NULL AND title_key = ?1 AND (?2 IS NULL OR id <> ?2) ORDER BY id",
+            )?;
+            for row in stmt.query_map(params![key, exclude], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })? {
+                let (id, kind, title) = row?;
+                found.push(Duplicate {
+                    id,
+                    kind: CardKind::from_db(&kind).expect("cards.kind is constrained by CHECK"),
+                    title,
+                    reason: DuplicateReason::Title,
+                });
+            }
+        }
+        // Короткие обрывки номера совпадают с чем угодно — проверять только
+        // номера, похожие на настоящие.
+        let pkey = phone.map(phone_key).filter(|k| k.len() >= 6);
+        if let Some(pkey) = pkey {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT c.id, c.kind, c.title FROM contacts k JOIN cards c ON c.id = k.card_id
+                 WHERE c.deleted_at IS NULL AND k.channel IN ('phone', 'whatsapp', 'viber')
+                   AND k.value_key = ?1 AND (?2 IS NULL OR c.id <> ?2) ORDER BY c.id",
+            )?;
+            for row in stmt.query_map(params![pkey, exclude], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })? {
+                let (id, kind, title) = row?;
+                if !found.iter().any(|d| d.id == id) {
+                    found.push(Duplicate {
+                        id,
+                        kind: CardKind::from_db(&kind).expect("cards.kind is constrained by CHECK"),
+                        title,
+                        reason: DuplicateReason::Phone,
+                    });
+                }
+            }
+        }
+        Ok(found)
     }
 
     fn list_terms(&self, vocabulary: Vocabulary) -> RepoResult<Vec<Term>> {
@@ -353,15 +536,26 @@ impl Repository for SqliteRepository {
         let value = required(value, "contact value")?;
         let position = self.next_position("contacts", card_id)?;
         self.conn.execute(
-            "INSERT INTO contacts (card_id, channel, value, label, position) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![card_id, channel.as_db(), value, label.trim(), position],
+            "INSERT INTO contacts (card_id, channel, value, value_key, label, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![card_id, channel.as_db(), value, contact_key(channel, &value), label.trim(), position],
         )?;
         let id = self.conn.last_insert_rowid();
         self.touch(card_id)?;
         Ok(id)
     }
 
+    fn update_contact(&mut self, id: i64, channel: Channel, value: &str, label: &str) -> RepoResult<()> {
+        let value = required(value, "contact value")?;
+        check_changed(self.conn.execute(
+            "UPDATE contacts SET channel = ?2, value = ?3, value_key = ?4, label = ?5 WHERE id = ?1",
+            params![id, channel.as_db(), value, contact_key(channel, &value), label.trim()],
+        )?)?;
+        self.touch_owner("contacts", id)
+    }
+
     fn remove_contact(&mut self, id: i64) -> RepoResult<()> {
+        self.touch_owner("contacts", id)?;
         check_changed(self.conn.execute("DELETE FROM contacts WHERE id = ?1", [id])?)
     }
 
@@ -378,7 +572,17 @@ impl Repository for SqliteRepository {
         Ok(id)
     }
 
+    fn update_address(&mut self, id: i64, text: &str, label_id: Option<i64>) -> RepoResult<()> {
+        let text = required(text, "address")?;
+        check_changed(self.conn.execute(
+            "UPDATE addresses SET text = ?2, label_id = ?3 WHERE id = ?1",
+            params![id, text, label_id],
+        )?)?;
+        self.touch_owner("addresses", id)
+    }
+
     fn remove_address(&mut self, id: i64) -> RepoResult<()> {
+        self.touch_owner("addresses", id)?;
         check_changed(self.conn.execute("DELETE FROM addresses WHERE id = ?1", [id])?)
     }
 
@@ -401,7 +605,17 @@ impl Repository for SqliteRepository {
         Ok(id)
     }
 
+    fn update_file_link(&mut self, id: i64, kind: FileLinkKind, target: &str, title: &str) -> RepoResult<()> {
+        let target = required(target, "file link target")?;
+        check_changed(self.conn.execute(
+            "UPDATE file_links SET kind = ?2, target = ?3, title = ?4 WHERE id = ?1",
+            params![id, kind.as_db(), target, title.trim()],
+        )?)?;
+        self.touch_owner("file_links", id)
+    }
+
     fn remove_file_link(&mut self, id: i64) -> RepoResult<()> {
+        self.touch_owner("file_links", id)?;
         check_changed(self.conn.execute("DELETE FROM file_links WHERE id = ?1", [id])?)
     }
 
@@ -425,6 +639,22 @@ impl Repository for SqliteRepository {
             "DELETE FROM company_people WHERE company_id = ?1 AND person_id = ?2",
             params![company_id, person_id],
         )?)
+    }
+
+    fn get_setting(&self, key: &str) -> RepoResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    fn set_setting(&mut self, key: &str, value: &str) -> RepoResult<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 }
 
@@ -452,6 +682,33 @@ mod tests {
         let r = SqliteRepository::open(&path).unwrap();
         assert_eq!(r.schema_version().unwrap(), migrations::latest_version());
         assert_eq!(r.get_card(id).unwrap().title, "Ателье Тест");
+    }
+
+    #[test]
+    fn v1_database_with_data_upgrades_to_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        {
+            // База в том виде, в каком её оставила фаза 1 (только схема v1).
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(crate::migrations::schema_v1_for_tests()).unwrap();
+            tx.pragma_update(None, "user_version", 1).unwrap();
+            tx.commit().unwrap();
+            conn.execute(
+                "INSERT INTO cards (kind, title, title_key) VALUES ('company', 'Старая', 'старая')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO contacts (card_id, channel, value, position) VALUES (1, 'phone', '+7 000', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let r = SqliteRepository::open(&path).unwrap();
+        assert_eq!(r.schema_version().unwrap(), migrations::latest_version());
+        assert_eq!(r.list_rows(None).unwrap()[0].main_phone.as_deref(), Some("+7 000"));
     }
 
     #[test]
@@ -563,6 +820,18 @@ mod tests {
     }
 
     #[test]
+    fn link_person_twice_updates_position() {
+        let mut r = repo();
+        let c = r.create_card(CardKind::Company, "Фирма", "").unwrap();
+        let p = r.create_card(CardKind::Person, "Человек", "").unwrap();
+        r.link_person(c, p, "Менеджер").unwrap();
+        r.link_person(c, p, "Директор").unwrap();
+        let m = r.card_details(c).unwrap().memberships;
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].position, "Директор");
+    }
+
+    #[test]
     fn link_person_checks_kinds_in_repo_and_in_database() {
         let mut r = repo();
         let c = r.create_card(CardKind::Company, "Фирма", "").unwrap();
@@ -602,15 +871,135 @@ mod tests {
     }
 
     #[test]
+    fn soft_delete_hides_card_and_restore_brings_back_everything() {
+        let mut r = repo();
+        let c = r.create_card(CardKind::Company, "Фирма", "").unwrap();
+        let p = r.create_card(CardKind::Person, "Человек", "").unwrap();
+        r.link_person(c, p, "Менеджер").unwrap();
+        r.add_contact(c, Channel::Phone, "+7 000 111-22-33", "").unwrap();
+
+        r.soft_delete_card(c).unwrap();
+        assert!(matches!(r.get_card(c), Err(RepoError::NotFound)));
+        assert_eq!(r.list_rows(None).unwrap().len(), 1);
+        assert!(r.card_details(p).unwrap().memberships.is_empty());
+        assert!(r.list_rows(Some(CardKind::Person)).unwrap()[0].companies.is_empty());
+        assert!(r.find_duplicates("Фирма", None, None).unwrap().is_empty());
+        assert!(matches!(r.add_contact(c, Channel::Phone, "1", ""), Err(RepoError::NotFound)));
+
+        r.restore_card(c).unwrap();
+        let d = r.card_details(c).unwrap();
+        assert_eq!(d.contacts.len(), 1);
+        assert_eq!(d.memberships[0].position, "Менеджер");
+    }
+
+    #[test]
+    fn purge_removes_only_deleted_cards() {
+        let mut r = repo();
+        let keep = r.create_card(CardKind::Company, "Живая", "").unwrap();
+        let gone = r.create_card(CardKind::Company, "Удалённая", "").unwrap();
+        r.soft_delete_card(gone).unwrap();
+        assert_eq!(r.purge_deleted().unwrap(), 1);
+        assert!(r.get_card(keep).is_ok());
+        assert!(matches!(r.restore_card(gone), Err(RepoError::NotFound)));
+    }
+
+    #[test]
+    fn purge_card_touches_only_that_deleted_card() {
+        let mut r = repo();
+        let live = r.create_card(CardKind::Company, "Живая", "").unwrap();
+        let a = r.create_card(CardKind::Company, "А", "").unwrap();
+        let b = r.create_card(CardKind::Company, "Б", "").unwrap();
+        r.soft_delete_card(a).unwrap();
+        r.soft_delete_card(b).unwrap();
+        r.purge_card(a).unwrap();
+        r.restore_card(b).unwrap();
+        assert!(matches!(r.purge_card(live), Err(RepoError::NotFound)));
+        assert_eq!(r.list_cards(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn list_rows_shows_roles_specializations_companies_and_first_phone() {
+        let mut r = repo();
+        let c = r.create_card(CardKind::Company, "Ателье", "").unwrap();
+        let p = r.create_card(CardKind::Person, "Мастер", "").unwrap();
+        r.link_person(c, p, "").unwrap();
+        let role = r.find_or_add_term(Vocabulary::Roles, "Монтажник").unwrap();
+        let spec = r.find_or_add_term(Vocabulary::Specializations, "Шторы").unwrap();
+        r.set_card_terms(p, CardVocabulary::Roles, &[role]).unwrap();
+        r.set_card_terms(p, CardVocabulary::Specializations, &[spec]).unwrap();
+        r.add_contact(p, Channel::Telegram, "@master", "").unwrap();
+        r.add_contact(p, Channel::Phone, "+7 000 1", "").unwrap();
+        r.add_contact(p, Channel::Phone, "+7 000 2", "").unwrap();
+
+        let rows = r.list_rows(Some(CardKind::Person)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].roles, ["Монтажник"]);
+        assert_eq!(rows[0].specializations, ["Шторы"]);
+        assert_eq!(rows[0].companies, ["Ателье"]);
+        assert_eq!(rows[0].main_phone.as_deref(), Some("+7 000 1"));
+    }
+
+    #[test]
+    fn duplicates_by_title_and_by_phone_in_any_format() {
+        let mut r = repo();
+        let a = r.create_card(CardKind::Company, "Ателье Тест", "").unwrap();
+        let b = r.create_card(CardKind::Person, "Иван", "").unwrap();
+        r.add_contact(b, Channel::Phone, "8 (900) 000-11-22", "").unwrap();
+
+        let d = r.find_duplicates("  ателье   ТЕСТ ", None, None).unwrap();
+        assert_eq!((d.len(), d[0].id, d[0].reason), (1, a, DuplicateReason::Title));
+        assert!(r.find_duplicates("Ателье Тест", None, Some(a)).unwrap().is_empty());
+
+        let d = r.find_duplicates("", Some("+7 900 000 11 22"), None).unwrap();
+        assert_eq!((d.len(), d[0].id, d[0].reason), (1, b, DuplicateReason::Phone));
+        assert!(r.find_duplicates("", Some("22"), None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn updates_of_contacts_addresses_and_links() {
+        let mut r = repo();
+        let c = r.create_card(CardKind::Company, "Фирма", "").unwrap();
+        let k = r.add_contact(c, Channel::Phone, "1", "").unwrap();
+        r.update_contact(k, Channel::Whatsapp, "+7 000 333-44-55", "рабочий").unwrap();
+        let a = r.add_address(c, "Старый адрес", None).unwrap();
+        let office = r.find_or_add_term(Vocabulary::AddressLabels, "Офис").unwrap();
+        r.update_address(a, "Новый адрес", Some(office)).unwrap();
+        let f = r.add_file_link(c, FileLinkKind::Local, "C:\\a.xlsx", "").unwrap();
+        r.update_file_link(f, FileLinkKind::YandexDisk, "https://disk.yandex.ru/d/test", "Папка").unwrap();
+        assert!(matches!(r.update_contact(k, Channel::Phone, "  ", ""), Err(RepoError::EmptyValue(_))));
+
+        let d = r.card_details(c).unwrap();
+        assert_eq!((d.contacts[0].channel, d.contacts[0].label.as_str()), (Channel::Whatsapp, "рабочий"));
+        assert_eq!(d.addresses[0].label.as_ref().unwrap().name, "Офис");
+        assert_eq!(d.file_links[0].kind, FileLinkKind::YandexDisk);
+        // WhatsApp-номер тоже участвует в поиске дублей по телефону.
+        assert_eq!(r.find_duplicates("", Some("89000"), None).unwrap().len(), 0);
+        assert_eq!(r.find_duplicates("", Some("8 000 333 44 55"), None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let mut r = repo();
+        assert_eq!(r.get_setting("theme").unwrap(), None);
+        r.set_setting("theme", "dark").unwrap();
+        r.set_setting("theme", "light").unwrap();
+        assert_eq!(r.get_setting("theme").unwrap().as_deref(), Some("light"));
+    }
+
+    #[test]
     fn operations_on_missing_card_report_not_found() {
         let mut r = repo();
         assert!(matches!(r.get_card(42), Err(RepoError::NotFound)));
         assert!(matches!(r.update_card(42, "x", ""), Err(RepoError::NotFound)));
         assert!(matches!(r.add_contact(42, Channel::Phone, "1", ""), Err(RepoError::NotFound)));
+        assert!(matches!(r.remove_contact(42), Err(RepoError::NotFound)));
     }
 
     #[test]
-    fn text_key_folds_case_and_spaces() {
+    fn keys_fold_case_spaces_and_phone_formats() {
         assert_eq!(text_key("  Шторы   и  КАРНИЗЫ "), "шторы и карнизы");
+        assert_eq!(phone_key("8 (900) 123-45-67"), "9001234567");
+        assert_eq!(phone_key("+7 900 123 45 67"), "9001234567");
+        assert_eq!(phone_key("123-45"), "12345");
     }
 }

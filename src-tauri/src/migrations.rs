@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 /// Каждая миграция применяется один раз, по порядку; уже выпущенные — не
 /// редактировать: у пользователя они уже применены, правка их не повторит.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE cards (
@@ -116,6 +116,25 @@ CREATE TABLE file_links (
 CREATE INDEX file_links_card ON file_links (card_id, position);
 "#;
 
+const SCHEMA_V2: &str = r#"
+-- Удалённая карточка сначала только помечается: «Отменить» возвращает её
+-- целиком, со всеми телефонами, адресами и связями. Окончательно стирается
+-- после окна отмены или при следующем запуске.
+ALTER TABLE cards ADD COLUMN deleted_at TEXT;
+CREATE INDEX cards_deleted ON cards (deleted_at);
+
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Ключ сравнения контакта: у телефона — только цифры без кода страны
+-- («8 900…» и «+7 900…» — один номер), у остальных — строчные буквы.
+-- Считается в Rust: SQLite не умеет выбрасывать из строки всё, кроме цифр.
+ALTER TABLE contacts ADD COLUMN value_key TEXT NOT NULL DEFAULT '';
+CREATE INDEX contacts_value_key ON contacts (channel, value_key);
+"#;
+
 #[derive(Debug)]
 pub enum MigrationError {
     /// База создана более новой версией программы — открывать её старой нельзя,
@@ -141,6 +160,11 @@ impl From<rusqlite::Error> for MigrationError {
     fn from(e: rusqlite::Error) -> Self {
         MigrationError::Db(e)
     }
+}
+
+#[cfg(test)]
+pub fn schema_v1_for_tests() -> &'static str {
+    SCHEMA_V1
 }
 
 pub fn latest_version() -> u32 {

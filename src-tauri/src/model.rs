@@ -1,8 +1,8 @@
 //! Типы данных справочника.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardKind {
     Company,
@@ -26,7 +26,7 @@ impl CardKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
     Phone,
@@ -65,7 +65,7 @@ impl Channel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileLinkKind {
     YandexDisk,
@@ -90,7 +90,8 @@ impl FileLinkKind {
 }
 
 /// Словари «заранее заданные + свои значения».
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Vocabulary {
     Roles,
     Specializations,
@@ -110,7 +111,8 @@ impl Vocabulary {
 }
 
 /// Словари, значения которых привязываются к карточке целиком.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum CardVocabulary {
     Roles,
     Specializations,
@@ -198,4 +200,34 @@ pub struct CardDetails {
     pub addresses: Vec<Address>,
     pub file_links: Vec<FileLink>,
     pub memberships: Vec<Membership>,
+}
+
+/// Строка списка на главном экране.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRow {
+    pub id: i64,
+    pub kind: CardKind,
+    pub title: String,
+    pub roles: Vec<String>,
+    pub specializations: Vec<String>,
+    /// Для человека — компании, где он работает; для компании — пусто.
+    pub companies: Vec<String>,
+    pub main_phone: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DuplicateReason {
+    Title,
+    Phone,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Duplicate {
+    pub id: i64,
+    pub kind: CardKind,
+    pub title: String,
+    pub reason: DuplicateReason,
 }

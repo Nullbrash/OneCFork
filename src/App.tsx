@@ -1,40 +1,142 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { api, type CardKind } from "./api";
 import { t } from "./i18n";
 import { fetchAppInfo, showTestPlaque, type AppInfo } from "./lib/appInfo";
+import { DEFAULT_COLUMNS, parseColumns, type ColumnSettings } from "./lib/columns";
+import { DEFAULT_SORT, type SortState } from "./lib/sort";
+import { parseTheme, resolveTheme, type ThemeChoice } from "./lib/theme";
+import { CardScreen } from "./screens/CardScreen";
+import { ListScreen, type Tab } from "./screens/ListScreen";
+import { ToastProvider, useToasts } from "./ui/toasts";
+
+type Screen = { name: "list" } | { name: "card"; id: number | null; newKind: CardKind };
+
+const COLUMNS_KEY = "listColumns";
+const THEME_KEY = "theme";
 
 export function App() {
+  return (
+    <ToastProvider>
+      <Shell />
+    </ToastProvider>
+  );
+}
+
+function Shell() {
+  const toasts = useToasts();
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [screen, setScreen] = useState<Screen>({ name: "list" });
+  const [tab, setTab] = useState<Tab>("all");
+  const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
+  const [columns, setColumns] = useState<ColumnSettings>(DEFAULT_COLUMNS);
+  const [theme, setTheme] = useState<ThemeChoice>("system");
+  const [revision, setRevision] = useState(0);
+
+  const changed = useCallback(() => setRevision((r) => r + 1), []);
+  const back = useCallback(() => setScreen({ name: "list" }), []);
+  const open = useCallback((id: number) => setScreen({ name: "card", id, newKind: "company" }), []);
 
   useEffect(() => {
-    fetchAppInfo()
-      .then(setInfo)
-      .catch(() => setFailed(true));
-  }, []);
+    fetchAppInfo().then(setInfo).catch(toasts.error);
+    api
+      .getSetting(COLUMNS_KEY)
+      .then((v) => setColumns(parseColumns(v)))
+      .catch(toasts.error);
+    api
+      .getSetting(THEME_KEY)
+      .then((v) => setTheme(parseTheme(v)))
+      .catch(toasts.error);
+  }, [toasts.error]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      document.documentElement.dataset.theme = resolveTheme(theme, media.matches);
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+
+  // Esc: в поле ввода — выйти из поля (правка сохранится); иначе — назад к списку.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || screen.name !== "card") return;
+      const el = document.activeElement;
+      if (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLSelectElement
+      ) {
+        el.blur();
+      } else {
+        back();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [screen.name, back]);
+
+  const saveColumns = (next: ColumnSettings) => {
+    setColumns(next);
+    api.setSetting(COLUMNS_KEY, JSON.stringify(next)).catch(toasts.error);
+  };
+
+  const saveTheme = (next: ThemeChoice) => {
+    setTheme(next);
+    api.setSetting(THEME_KEY, next).catch(toasts.error);
+  };
+
+  const deleted = (id: number, title: string) => {
+    back();
+    changed();
+    toasts.show(t.toast.cardDeleted(title), {
+      undo: () => api.restoreCard(id).then(changed).catch(toasts.error),
+      onExpire: () => void api.purgeCard(id).catch(() => undefined),
+    });
+  };
 
   return (
     <div className="app">
       {showTestPlaque(info) && (
-        <div className="test-plaque" title={t.testPlaqueHint}>
+        <div className="test-plaque" title={`${t.testPlaqueHint}\n${info?.dbPath ?? ""}`}>
           {t.testPlaque}
         </div>
       )}
-      <main className="stub">
-        <h1>{t.appTitle}</h1>
-        <p>{t.stubNotice}</p>
-        {failed && <p className="error">{t.loadError}</p>}
-        {!info && !failed && <p>{t.loading}</p>}
-        {info && (
-          <dl>
-            <dt>{t.info.version}</dt>
-            <dd>{info.version}</dd>
-            <dt>{t.info.database}</dt>
-            <dd>{info.dbPath}</dd>
-            <dt>{t.info.schema}</dt>
-            <dd>{info.schemaVersion}</dd>
-          </dl>
-        )}
-      </main>
+      {screen.name === "list" ? (
+        <ListScreen
+          tab={tab}
+          onTab={setTab}
+          sort={sort}
+          onSort={setSort}
+          columns={columns}
+          onColumns={saveColumns}
+          theme={theme}
+          onTheme={saveTheme}
+          revision={revision}
+          onOpen={open}
+          onCreate={(kind) => setScreen({ name: "card", id: null, newKind: kind })}
+        />
+      ) : (
+        <CardScreen
+          key={screen.id ?? `new-${screen.newKind}`}
+          id={screen.id}
+          newKind={screen.newKind}
+          onBack={back}
+          onOpen={open}
+          onCreated={(id) => {
+            changed();
+            open(id);
+          }}
+          onDeleted={deleted}
+          onChanged={changed}
+        />
+      )}
+      {info && (
+        <footer className="status">
+          {t.info.version} {info.version}
+        </footer>
+      )}
     </div>
   );
 }
