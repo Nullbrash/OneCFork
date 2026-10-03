@@ -142,7 +142,42 @@ export const api = {
   openFileLink: (kind: FileLinkKind, target: string) => invoke<void>("open_file_link", { kind, target }),
   pickFile: () => invoke<string | null>("pick_file"),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
+
+  pickSpreadsheet: () => invoke<string | null>("pick_spreadsheet"),
+  readSpreadsheet: (path: string) => invoke<Sheet[]>("read_spreadsheet", { path }),
+  findDuplicatesBatch: (items: { title: string; phone: string | null }[]) =>
+    invoke<Duplicate[][]>("find_duplicates_batch", { items }),
+  importRows: (rows: ImportRow[]) => invoke<ImportReport>("import_rows", { rows }),
 };
+
+export interface Sheet {
+  name: string;
+  rows: string[][];
+  truncated: boolean;
+}
+
+export type ImportAction = "create" | "skip" | "merge";
+
+export interface ImportRow {
+  kind: CardKind;
+  title: string;
+  contacts: { channel: Channel; value: string }[];
+  addresses: string[];
+  roles: string[];
+  specializations: string[];
+  note: string;
+  company: string;
+  position: string;
+  action: ImportAction;
+  mergeInto: number | null;
+}
+
+export interface ImportReport {
+  created: number;
+  merged: number;
+  skipped: number;
+  companiesCreated: number;
+}
 
 /** Каналы, у которых на ПК есть «открыть чат»; остальные — только копирование. */
 export const OPENABLE_CHANNELS: readonly Channel[] = ["telegram", "whatsapp", "viber", "email", "other"];

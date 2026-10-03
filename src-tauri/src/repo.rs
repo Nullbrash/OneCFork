@@ -93,6 +93,10 @@ pub trait Repository {
 
     fn get_setting(&self, key: &str) -> RepoResult<Option<String>>;
     fn set_setting(&mut self, key: &str, value: &str) -> RepoResult<()>;
+
+    /// Загрузка разобранных строк таблицы — целиком или никак: ошибка на
+    /// любой строке откатывает весь импорт.
+    fn import_batch(&mut self, rows: &[ImportRow]) -> RepoResult<ImportReport>;
 }
 
 /// Ключ сравнения: строчные буквы (включая кириллицу) и одиночные пробелы —
@@ -189,6 +193,141 @@ impl SqliteRepository {
             Some(card_id) => self.touch(card_id),
             None => Err(RepoError::NotFound),
         }
+    }
+
+    /// Живая карточка вида `kind` с таким же названием (без учёта регистра).
+    fn find_by_title(&self, kind: CardKind, title: &str) -> RepoResult<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM cards WHERE deleted_at IS NULL AND kind = ?1 AND title_key = ?2
+                 ORDER BY id LIMIT 1",
+                params![kind.as_db(), text_key(title)],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    fn import_inner(&mut self, rows: &[ImportRow]) -> RepoResult<ImportReport> {
+        let mut report = ImportReport::default();
+        // Созданные этим импортом: повтор той же строки в файле (одна компания
+        // в двух строках с разными телефонами) дополняет первую, а не плодит копию.
+        let mut created: HashMap<(&'static str, String), i64> = HashMap::new();
+        for row in rows {
+            let title = row.title.trim();
+            if row.action == ImportAction::Skip || title.is_empty() {
+                report.skipped += 1;
+                continue;
+            }
+            let key = (row.kind.as_db(), text_key(title));
+            let (target, is_new) = match (row.action, created.get(&key)) {
+                (ImportAction::Merge, _) => {
+                    let id = row.merge_into.ok_or(RepoError::NotFound)?;
+                    if self.card_kind(id)? != row.kind {
+                        return Err(RepoError::WrongKind("merge target has another kind"));
+                    }
+                    report.merged += 1;
+                    (id, false)
+                }
+                (_, Some(&id)) => {
+                    report.merged += 1;
+                    (id, false)
+                }
+                _ => {
+                    let id = self.create_card(row.kind, title, &row.note)?;
+                    created.insert(key, id);
+                    report.created += 1;
+                    (id, true)
+                }
+            };
+            self.apply_import_row(target, row, is_new, &mut created, &mut report)?;
+        }
+        Ok(report)
+    }
+
+    /// Дописывает в карточку то, чего в ней ещё нет; существующее не трогает.
+    fn apply_import_row(
+        &mut self,
+        id: i64,
+        row: &ImportRow,
+        is_new: bool,
+        created: &mut HashMap<(&'static str, String), i64>,
+        report: &mut ImportReport,
+    ) -> RepoResult<()> {
+        let note = row.note.trim();
+        if !is_new && !note.is_empty() {
+            let card = self.get_card(id)?;
+            if !card.note.contains(note) {
+                let merged =
+                    if card.note.is_empty() { note.to_string() } else { format!("{}\n{note}", card.note) };
+                self.update_card(id, &card.title, &merged)?;
+            }
+        }
+
+        let details = self.card_details(id)?;
+        let mut have: Vec<(Channel, String)> =
+            details.contacts.iter().map(|c| (c.channel, contact_key(c.channel, &c.value))).collect();
+        for c in &row.contacts {
+            let value = c.value.trim();
+            let k = (c.channel, contact_key(c.channel, value));
+            if value.is_empty() || have.contains(&k) {
+                continue;
+            }
+            self.add_contact(id, c.channel, value, "")?;
+            have.push(k);
+        }
+
+        let mut addr: Vec<String> = details.addresses.iter().map(|a| text_key(&a.text)).collect();
+        for a in &row.addresses {
+            let k = text_key(a);
+            if k.is_empty() || addr.contains(&k) {
+                continue;
+            }
+            self.add_address(id, a, None)?;
+            addr.push(k);
+        }
+
+        for (which, names, current) in [
+            (CardVocabulary::Roles, &row.roles, &details.roles),
+            (CardVocabulary::Specializations, &row.specializations, &details.specializations),
+        ] {
+            let mut ids: Vec<i64> = current.iter().map(|t| t.id).collect();
+            let before = ids.len();
+            for name in names.iter().filter(|n| !n.trim().is_empty()) {
+                let term = self.find_or_add_term(which.vocabulary(), name)?;
+                if !ids.contains(&term) {
+                    ids.push(term);
+                }
+            }
+            if ids.len() != before {
+                self.set_card_terms(id, which, &ids)?;
+            }
+        }
+
+        let company = row.company.trim();
+        if row.kind == CardKind::Person && !company.is_empty() {
+            let key = (CardKind::Company.as_db(), text_key(company));
+            let company_id = match created.get(&key) {
+                Some(&c) => c,
+                None => match self.find_by_title(CardKind::Company, company)? {
+                    Some(c) => c,
+                    None => {
+                        let c = self.create_card(CardKind::Company, company, "")?;
+                        created.insert(key, c);
+                        report.companies_created += 1;
+                        c
+                    }
+                },
+            };
+            let existing = details.memberships.iter().find(|m| m.card_id == company_id);
+            // Пустая должность из таблицы не затирает уже записанную.
+            let position = match (row.position.trim(), existing) {
+                ("", Some(m)) => m.position.clone(),
+                (p, _) => p.to_string(),
+            };
+            self.link_person(company_id, id, &position)?;
+        }
+        Ok(())
     }
 
     fn card_terms(&self, card_id: i64, which: CardVocabulary) -> RepoResult<Vec<Term>> {
@@ -578,7 +717,9 @@ impl Repository for SqliteRepository {
     fn set_card_terms(&mut self, card_id: i64, which: CardVocabulary, term_ids: &[i64]) -> RepoResult<()> {
         self.card_kind(card_id)?;
         let (link, column) = which.link();
-        let tx = self.conn.transaction()?;
+        // Savepoint, а не transaction: метод вызывается и внутри импорта, где
+        // уже открыта общая точка отката, а BEGIN внутри неё SQLite запрещает.
+        let tx = self.conn.savepoint()?;
         tx.execute(&format!("DELETE FROM {link} WHERE card_id = ?1"), [card_id])?;
         for term_id in term_ids {
             tx.execute(
@@ -698,6 +839,22 @@ impl Repository for SqliteRepository {
             "DELETE FROM company_people WHERE company_id = ?1 AND person_id = ?2",
             params![company_id, person_id],
         )?)
+    }
+
+    fn import_batch(&mut self, rows: &[ImportRow]) -> RepoResult<ImportReport> {
+        // SAVEPOINT, а не транзакция rusqlite: внутри используются обычные
+        // методы репозитория, работающие с `self.conn`.
+        self.conn.execute_batch("SAVEPOINT import_batch")?;
+        match self.import_inner(rows) {
+            Ok(report) => {
+                self.conn.execute_batch("RELEASE import_batch")?;
+                Ok(report)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO import_batch; RELEASE import_batch");
+                Err(e)
+            }
+        }
     }
 
     fn get_setting(&self, key: &str) -> RepoResult<Option<String>> {
@@ -1080,6 +1237,150 @@ mod tests {
         assert!(matches!(r.update_card(42, "x", ""), Err(RepoError::NotFound)));
         assert!(matches!(r.add_contact(42, Channel::Phone, "1", ""), Err(RepoError::NotFound)));
         assert!(matches!(r.remove_contact(42), Err(RepoError::NotFound)));
+    }
+
+    fn import_row(kind: CardKind, title: &str) -> ImportRow {
+        ImportRow {
+            kind,
+            title: title.into(),
+            contacts: vec![],
+            addresses: vec![],
+            roles: vec![],
+            specializations: vec![],
+            note: String::new(),
+            company: String::new(),
+            position: String::new(),
+            action: ImportAction::Create,
+            merge_into: None,
+        }
+    }
+
+    fn phone(value: &str) -> ImportContact {
+        ImportContact { channel: Channel::Phone, value: value.into() }
+    }
+
+    #[test]
+    fn import_creates_cards_with_everything() {
+        let mut r = repo();
+        let mut row = import_row(CardKind::Company, "Ателье Тест");
+        row.contacts = vec![phone("79000001122"), ImportContact { channel: Channel::Email, value: "a@example.com".into() }];
+        row.addresses = vec!["ул. Примерная, 1".into()];
+        row.roles = vec!["Поставщик".into(), " ".into()];
+        row.specializations = vec!["Ткани".into()];
+        row.note = "из таблицы".into();
+        let rep = r.import_batch(&[row]).unwrap();
+        assert_eq!(rep, ImportReport { created: 1, ..Default::default() });
+
+        let d = r.card_details(r.list_cards(None).unwrap()[0].id).unwrap();
+        assert_eq!(d.contacts.len(), 2);
+        assert_eq!(d.addresses[0].text, "ул. Примерная, 1");
+        assert_eq!(d.roles[0].name, "Поставщик"); // заранее заданная роль, не новая
+        assert_eq!(r.list_terms(Vocabulary::Roles).unwrap().len(), 4);
+        assert_eq!(d.specializations[0].name, "Ткани");
+        assert_eq!(d.card.note, "из таблицы");
+    }
+
+    #[test]
+    fn import_skips_rows_without_title_and_skip_action() {
+        let mut r = repo();
+        let mut skip = import_row(CardKind::Company, "Пропустить");
+        skip.action = ImportAction::Skip;
+        let rep = r.import_batch(&[import_row(CardKind::Company, "  "), skip]).unwrap();
+        assert_eq!(rep.skipped, 2);
+        assert!(r.list_cards(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn repeated_rows_in_one_file_merge_into_the_first() {
+        let mut r = repo();
+        let mut a = import_row(CardKind::Company, "Фирма");
+        a.contacts = vec![phone("8 900 000-11-22")];
+        let mut b = import_row(CardKind::Company, " фирма ");
+        b.contacts = vec![phone("+7 900 000 11 22"), phone("+7 900 000 33 44")];
+        let rep = r.import_batch(&[a, b]).unwrap();
+        assert_eq!((rep.created, rep.merged), (1, 1));
+        let cards = r.list_cards(None).unwrap();
+        assert_eq!(cards.len(), 1);
+        // Тот же номер в другом формате не дублируется, новый — добавлен.
+        assert_eq!(r.card_details(cards[0].id).unwrap().contacts.len(), 2);
+    }
+
+    #[test]
+    fn merge_into_existing_adds_only_missing_data_and_appends_note() {
+        let mut r = repo();
+        let id = r.create_card(CardKind::Company, "Старая", "старая заметка").unwrap();
+        r.add_contact(id, Channel::Phone, "8 900 000-11-22", "").unwrap();
+        r.add_address(id, "ул. Первая, 1", None).unwrap();
+        let mut row = import_row(CardKind::Company, "Старая из файла");
+        row.action = ImportAction::Merge;
+        row.merge_into = Some(id);
+        row.contacts = vec![phone("79000001122"), phone("79000009999")];
+        row.addresses = vec!["УЛ. ПЕРВАЯ, 1".into(), "ул. Вторая, 2".into()];
+        row.note = "новая заметка".into();
+        let rep = r.import_batch(&[row]).unwrap();
+        assert_eq!(rep.merged, 1);
+        let d = r.card_details(id).unwrap();
+        assert_eq!(d.card.title, "Старая");
+        assert_eq!(d.contacts.len(), 2);
+        assert_eq!(d.addresses.len(), 2);
+        assert_eq!(d.card.note, "старая заметка\nновая заметка");
+    }
+
+    #[test]
+    fn people_are_linked_to_existing_or_new_companies() {
+        let mut r = repo();
+        let existing = r.create_card(CardKind::Company, "Ателье Тест", "").unwrap();
+        let mut a = import_row(CardKind::Person, "Мария");
+        a.company = "ателье тест".into();
+        a.position = "Менеджер".into();
+        let mut b = import_row(CardKind::Person, "Пётр");
+        b.company = "Новая Фирма".into();
+        let mut c = import_row(CardKind::Person, "Олег");
+        c.company = "Новая фирма".into();
+        let rep = r.import_batch(&[a, b, c]).unwrap();
+        assert_eq!((rep.created, rep.companies_created), (3, 1));
+        let ex = r.card_details(existing).unwrap();
+        assert_eq!(ex.memberships[0].title, "Мария");
+        assert_eq!(ex.memberships[0].position, "Менеджер");
+        let new_firm = r.list_cards(Some(CardKind::Company)).unwrap().into_iter().find(|c| c.title == "Новая Фирма");
+        assert_eq!(r.card_details(new_firm.unwrap().id).unwrap().memberships.len(), 2);
+    }
+
+    #[test]
+    fn empty_position_does_not_overwrite_existing_one() {
+        let mut r = repo();
+        let c = r.create_card(CardKind::Company, "Фирма", "").unwrap();
+        let p = r.create_card(CardKind::Person, "Иван", "").unwrap();
+        r.link_person(c, p, "Бригадир").unwrap();
+        let mut row = import_row(CardKind::Person, "Иван");
+        row.action = ImportAction::Merge;
+        row.merge_into = Some(p);
+        row.company = "Фирма".into();
+        r.import_batch(&[row]).unwrap();
+        assert_eq!(r.card_details(c).unwrap().memberships[0].position, "Бригадир");
+    }
+
+    #[test]
+    fn failing_row_rolls_back_the_whole_import() {
+        let mut r = repo();
+        let mut bad = import_row(CardKind::Company, "Плохая");
+        bad.action = ImportAction::Merge;
+        bad.merge_into = Some(999);
+        let err = r.import_batch(&[import_row(CardKind::Company, "Хорошая"), bad]);
+        assert!(matches!(err, Err(RepoError::NotFound)));
+        assert!(r.list_cards(None).unwrap().is_empty());
+        // После отката база в рабочем состоянии.
+        r.create_card(CardKind::Company, "После", "").unwrap();
+    }
+
+    #[test]
+    fn merge_into_card_of_another_kind_is_refused() {
+        let mut r = repo();
+        let person = r.create_card(CardKind::Person, "Иван", "").unwrap();
+        let mut row = import_row(CardKind::Company, "Иван");
+        row.action = ImportAction::Merge;
+        row.merge_into = Some(person);
+        assert!(matches!(r.import_batch(&[row]), Err(RepoError::WrongKind(_))));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod links;
 pub mod migrations;
 pub mod model;
 pub mod repo;
+pub mod spreadsheet;
 
 use std::sync::Mutex;
 
@@ -78,6 +79,10 @@ pub fn run() {
             commands::open_file_link,
             commands::pick_file,
             commands::copy_text,
+            commands::pick_spreadsheet,
+            commands::read_spreadsheet,
+            commands::find_duplicates_batch,
+            commands::import_rows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OneCFork");

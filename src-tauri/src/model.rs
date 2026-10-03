@@ -239,3 +239,53 @@ pub struct Duplicate {
     pub title: String,
     pub reason: DuplicateReason,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportAction {
+    Create,
+    Skip,
+    /// Дополнить существующую карточку `merge_into` недостающими данными.
+    Merge,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportContact {
+    pub channel: Channel,
+    pub value: String,
+}
+
+/// Одна строка таблицы, уже разобранная по полям карточки.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRow {
+    pub kind: CardKind,
+    pub title: String,
+    #[serde(default)]
+    pub contacts: Vec<ImportContact>,
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub specializations: Vec<String>,
+    #[serde(default)]
+    pub note: String,
+    /// Для человека — компания, где он работает (найдётся или будет создана).
+    #[serde(default)]
+    pub company: String,
+    #[serde(default)]
+    pub position: String,
+    pub action: ImportAction,
+    pub merge_into: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    pub created: usize,
+    pub merged: usize,
+    pub skipped: usize,
+    pub companies_created: usize,
+}

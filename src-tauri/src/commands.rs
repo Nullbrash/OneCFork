@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
@@ -11,6 +11,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::db_mode::DbMode;
 use crate::links::{self, MapService};
+use crate::spreadsheet::{self, Sheet};
 use crate::model::*;
 use crate::repo::{RepoError, Repository, SqliteRepository};
 use crate::AppState;
@@ -286,4 +287,44 @@ pub async fn pick_file(app: AppHandle) -> Option<String> {
 #[tauri::command]
 pub fn copy_text(app: AppHandle, text: String) -> CmdResult<()> {
     app.clipboard().write_text(text).map_err(|e| fail("copy_failed", e))
+}
+
+/// Async — по той же причине, что `pick_file`.
+#[tauri::command]
+pub async fn pick_spreadsheet(app: AppHandle) -> Option<String> {
+    app.dialog()
+        .file()
+        .add_filter("Excel / OpenDocument", &["xlsx", "xlsm", "xls", "ods"])
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+}
+
+/// Async: большой файл читается заметное время — не держать главный поток.
+#[tauri::command]
+pub async fn read_spreadsheet(path: String) -> CmdResult<Vec<Sheet>> {
+    spreadsheet::read_sheets(Path::new(path.trim())).map_err(|e| fail("spreadsheet", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateQuery {
+    pub title: String,
+    pub phone: Option<String>,
+}
+
+/// Дубли для всех строк импорта за один вызов (и одну блокировку базы).
+#[tauri::command]
+pub fn find_duplicates_batch(
+    state: State<'_, AppState>,
+    items: Vec<DuplicateQuery>,
+) -> CmdResult<Vec<Vec<Duplicate>>> {
+    with_repo(&state, |r| {
+        items.iter().map(|q| r.find_duplicates(&q.title, q.phone.as_deref(), None)).collect()
+    })
+}
+
+#[tauri::command]
+pub fn import_rows(state: State<'_, AppState>, rows: Vec<ImportRow>) -> CmdResult<ImportReport> {
+    with_repo(&state, |r| r.import_batch(&rows))
 }

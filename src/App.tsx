@@ -7,10 +7,11 @@ import { NO_FILTERS, type SearchFilters } from "./lib/search";
 import { DEFAULT_SORT, type SortState } from "./lib/sort";
 import { parseTheme, resolveTheme, type ThemeChoice } from "./lib/theme";
 import { CardScreen } from "./screens/CardScreen";
+import { ImportScreen } from "./screens/ImportScreen";
 import { ListScreen, type Tab } from "./screens/ListScreen";
 import { ToastProvider, useToasts } from "./ui/toasts";
 
-type Screen = { name: "list" } | { name: "card"; id: number | null; newKind: CardKind };
+type Screen = { name: "list" } | { name: "card"; id: number | null; newKind: CardKind } | { name: "import" };
 
 const COLUMNS_KEY = "listColumns";
 const THEME_KEY = "theme";
@@ -135,6 +136,7 @@ function Shell() {
           revision={revision}
           onOpen={open}
           onCreate={(kind) => setScreen({ name: "card", id: null, newKind: kind })}
+          onImport={() => setScreen({ name: "import" })}
           query={query}
           onQuery={setQuery}
           filters={filters}
@@ -142,6 +144,8 @@ function Shell() {
           focusSearch={focusSearch}
           onSearchFocused={searchFocused}
         />
+      ) : screen.name === "import" ? (
+        <ImportScreen onBack={back} onImported={changed} />
       ) : (
         <CardScreen
           key={screen.id ?? `new-${screen.newKind}`}

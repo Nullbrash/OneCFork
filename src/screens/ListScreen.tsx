@@ -32,6 +32,7 @@ interface Props {
   revision: number;
   onOpen: (id: number) => void;
   onCreate: (kind: CardKind) => void;
+  onImport: () => void;
   query: string;
   onQuery: (q: string) => void;
   filters: SearchFilters;
@@ -96,6 +97,9 @@ export function ListScreen(props: Props) {
               </div>
             )}
           </div>
+          <button type="button" onClick={props.onImport}>
+            {t.importer.open}
+          </button>
           <div className="menu-anchor">
             <button type="button" onClick={() => setMenu(menu === "columns" ? null : "columns")}>
               {t.list.columns}
