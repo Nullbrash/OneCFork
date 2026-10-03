@@ -148,6 +148,11 @@ export const api = {
   findDuplicatesBatch: (items: { title: string; phone: string | null }[]) =>
     invoke<Duplicate[][]>("find_duplicates_batch", { items }),
   importRows: (rows: ImportRow[]) => invoke<ImportReport>("import_rows", { rows }),
+
+  pickExportTemplate: () => invoke<string | null>("pick_export_template"),
+  pickSavePath: (defaultName: string) => invoke<string | null>("pick_save_path", { defaultName }),
+  exportCards: (request: ExportRequest) => invoke<number>("export_cards", { request }),
+  revealFile: (path: string) => invoke<void>("reveal_file", { path }),
 };
 
 export interface Sheet {
@@ -181,3 +186,30 @@ export interface ImportReport {
 
 /** Каналы, у которых на ПК есть «открыть чат»; остальные — только копирование. */
 export const OPENABLE_CHANNELS: readonly Channel[] = ["telegram", "whatsapp", "viber", "email", "other"];
+
+export type ExportField =
+  | "title"
+  | "kind"
+  | "phone"
+  | "telegram"
+  | "whatsapp"
+  | "viber"
+  | "max"
+  | "email"
+  | "address"
+  | "roles"
+  | "specializations"
+  | "note"
+  | "company"
+  | "position";
+
+export interface ExportRequest {
+  template: string;
+  sheet: string;
+  /** Индекс строки заголовков с 0 — как в `Sheet.rows`. */
+  headerRow: number;
+  mapping: (ExportField | null)[];
+  cardIds: number[];
+  kindLabels: { company: string; person: string };
+  output: string;
+}

@@ -619,3 +619,23 @@ tr.unmapped {
 .small-text {
   font-size: 12px;
 }
+
+.left-actions {
+  justify-content: flex-start;
+}
+
+.hint-popup {
+  left: 0;
+  right: auto;
+  width: 420px;
+  padding: 10px 14px;
+}
+
+.hint-popup ul {
+  margin: 6px 0 8px;
+  padding-left: 18px;
+}
+
+.hint-popup li {
+  margin: 3px 0;
+}

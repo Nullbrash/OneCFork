@@ -1,5 +1,6 @@
 mod commands;
 pub mod db_mode;
+pub mod export;
 pub mod links;
 pub mod migrations;
 pub mod model;
@@ -83,6 +84,10 @@ pub fn run() {
             commands::read_spreadsheet,
             commands::find_duplicates_batch,
             commands::import_rows,
+            commands::pick_export_template,
+            commands::pick_save_path,
+            commands::export_cards,
+            commands::reveal_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OneCFork");

@@ -7,11 +7,16 @@ import { NO_FILTERS, type SearchFilters } from "./lib/search";
 import { DEFAULT_SORT, type SortState } from "./lib/sort";
 import { parseTheme, resolveTheme, type ThemeChoice } from "./lib/theme";
 import { CardScreen } from "./screens/CardScreen";
+import { ExportScreen } from "./screens/ExportScreen";
 import { ImportScreen } from "./screens/ImportScreen";
 import { ListScreen, type Tab } from "./screens/ListScreen";
 import { ToastProvider, useToasts } from "./ui/toasts";
 
-type Screen = { name: "list" } | { name: "card"; id: number | null; newKind: CardKind } | { name: "import" };
+type Screen =
+  | { name: "list" }
+  | { name: "card"; id: number | null; newKind: CardKind }
+  | { name: "import" }
+  | { name: "export"; cardIds: number[]; peopleOnly: boolean };
 
 const COLUMNS_KEY = "listColumns";
 const THEME_KEY = "theme";
@@ -137,6 +142,7 @@ function Shell() {
           onOpen={open}
           onCreate={(kind) => setScreen({ name: "card", id: null, newKind: kind })}
           onImport={() => setScreen({ name: "import" })}
+          onExport={(cardIds, peopleOnly) => setScreen({ name: "export", cardIds, peopleOnly })}
           query={query}
           onQuery={setQuery}
           filters={filters}
@@ -146,6 +152,12 @@ function Shell() {
         />
       ) : screen.name === "import" ? (
         <ImportScreen onBack={back} onImported={changed} />
+      ) : screen.name === "export" ? (
+        <ExportScreen
+          cardIds={screen.cardIds}
+          kindMode={screen.peopleOnly ? "person" : "company"}
+          onBack={back}
+        />
       ) : (
         <CardScreen
           key={screen.id ?? `new-${screen.newKind}`}

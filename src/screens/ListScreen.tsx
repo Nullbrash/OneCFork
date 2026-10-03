@@ -33,6 +33,8 @@ interface Props {
   onOpen: (id: number) => void;
   onCreate: (kind: CardKind) => void;
   onImport: () => void;
+  /** id карточек в порядке списка — для выгрузки «того, что сейчас в списке». */
+  onExport: (cardIds: number[], peopleOnly: boolean) => void;
   query: string;
   onQuery: (q: string) => void;
   filters: SearchFilters;
@@ -64,6 +66,11 @@ export function ListScreen(props: Props) {
   const companies = shown.filter((r) => r.kind === "company");
   const people = shown.filter((r) => r.kind === "person");
   const shownInTab = tab === "companies" ? companies.length : tab === "people" ? people.length : shown.length;
+  // В том же порядке, что на экране: сначала компании, потом люди.
+  const exportIds = [
+    ...(tab !== "people" ? sortRows(companies, props.sort) : []),
+    ...(tab !== "companies" ? sortRows(people, props.sort) : []),
+  ].map((r) => r.id);
 
   return (
     <div className="screen">
@@ -99,6 +106,13 @@ export function ListScreen(props: Props) {
           </div>
           <button type="button" onClick={props.onImport}>
             {t.importer.open}
+          </button>
+          <button
+            type="button"
+            disabled={exportIds.length === 0}
+            onClick={() => props.onExport(exportIds, tab === "people")}
+          >
+            {t.exporter.open(exportIds.length)}
           </button>
           <div className="menu-anchor">
             <button type="button" onClick={() => setMenu(menu === "columns" ? null : "columns")}>

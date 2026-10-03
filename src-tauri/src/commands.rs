@@ -10,6 +10,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::db_mode::DbMode;
+use crate::export::{self, ExportField, KindLabels};
 use crate::links::{self, MapService};
 use crate::spreadsheet::{self, Sheet};
 use crate::model::*;
@@ -327,4 +328,81 @@ pub fn find_duplicates_batch(
 #[tauri::command]
 pub fn import_rows(state: State<'_, AppState>, rows: Vec<ImportRow>) -> CmdResult<ImportReport> {
     with_repo(&state, |r| r.import_batch(&rows))
+}
+
+/// Async — по той же причине, что `pick_file`.
+#[tauri::command]
+pub async fn pick_export_template(app: AppHandle) -> Option<String> {
+    app.dialog()
+        .file()
+        // Только xlsx: записать с сохранением оформления умеем только его.
+        .add_filter("Excel (.xlsx)", &["xlsx"])
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+pub async fn pick_save_path(app: AppHandle, default_name: String) -> Option<String> {
+    app.dialog()
+        .file()
+        .add_filter("Excel (.xlsx)", &["xlsx"])
+        .set_file_name(default_name)
+        .blocking_save_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| {
+            // Окно сохранения не дописывает расширение само, если его стёрли.
+            if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx")) {
+                p
+            } else {
+                p.with_extension("xlsx")
+            }
+        })
+        .map(|p| p.display().to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRequest {
+    pub template: String,
+    pub sheet: String,
+    pub header_row: u32,
+    pub mapping: Vec<Option<ExportField>>,
+    /// В порядке списка на экране.
+    pub card_ids: Vec<i64>,
+    pub kind_labels: KindLabels,
+    pub output: String,
+}
+
+#[tauri::command]
+pub fn export_cards(state: State<'_, AppState>, request: ExportRequest) -> CmdResult<usize> {
+    let rows = with_repo(&state, |r| {
+        let mut rows = Vec::with_capacity(request.card_ids.len());
+        for id in &request.card_ids {
+            match r.card_details(*id) {
+                Ok(d) => rows.push(export::row_cells(&d, &request.mapping, &request.kind_labels)),
+                // Карточку удалили, пока шёл экспорт, — просто без неё.
+                Err(RepoError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(rows)
+    })?;
+    export::write_export(
+        Path::new(request.template.trim()),
+        &request.sheet,
+        request.header_row,
+        &request.mapping,
+        &rows,
+        Path::new(request.output.trim()),
+    )
+    .map_err(|e| match e {
+        export::ExportError::SameAsTemplate => fail("same_as_template", e),
+        _ => fail("export", e),
+    })
+}
+
+#[tauri::command]
+pub fn reveal_file(app: AppHandle, path: String) -> CmdResult<()> {
+    app.opener().reveal_item_in_dir(path.trim()).map_err(|e| fail("open_failed", e))
 }
